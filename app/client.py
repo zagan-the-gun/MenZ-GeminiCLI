@@ -49,29 +49,39 @@ async def handle_connection(
     ws = await websockets.connect(uri)
     try:
         logger.info("connected to %s", uri)
-        buffer: List[str] = []
-        current_speaker: Optional[str] = None
+        # 話者ごとのバッファとアイドルタスク
+        speaker_buffers: Dict[str, List[str]] = {}
         buffer_lock = asyncio.Lock()
-        idle_task: Optional[asyncio.Task] = None
+        idle_tasks: Dict[str, asyncio.Task] = {}
 
-        def cancel_idle_task() -> None:
-            nonlocal idle_task
-            if idle_task and not idle_task.done():
-                idle_task.cancel()
-            idle_task = None
+        def _speaker_key(s: Optional[str]) -> str:
+            return s or ""
 
-        async def flush_buffer() -> None:
-            nonlocal buffer, current_speaker
+        def cancel_idle_task(speaker: Optional[str]) -> None:
+            key = _speaker_key(speaker)
+            task = idle_tasks.get(key)
+            if task and not task.done():
+                task.cancel()
+            idle_tasks.pop(key, None)
+
+        def cancel_all_idle_tasks() -> None:
+            for k, task in list(idle_tasks.items()):
+                if task and not task.done():
+                    task.cancel()
+                idle_tasks.pop(k, None)
+
+        async def flush_buffer(speaker: Optional[str]) -> None:
+            key = _speaker_key(speaker)
             async with buffer_lock:
-                if not buffer:
+                buf = speaker_buffers.get(key, [])
+                if not buf:
                     return
-                batched_text = "\n".join(buffer)
-                buffer = []
+                batched_text = "\n".join(buf)
+                speaker_buffers[key] = []
             try:
-                comment = await runner.generate_comment_async(subtitle_text=batched_text, speaker=current_speaker)
+                comment = await runner.generate_comment_async(subtitle_text=batched_text, speaker=speaker)
                 logger.info("comment: %s", comment)
             except asyncio.CancelledError:
-                # Don't catch CancelledError - let it propagate
                 raise
             except Exception as e:
                 logger.exception("GeminiCLI error: %s", e)
@@ -80,25 +90,24 @@ async def handle_connection(
             outgoing = {"type": "comment", "comment": comment}
             logger.debug("sending: %s", outgoing)
             await ws.send(json.dumps(outgoing, ensure_ascii=False))
-            current_speaker = None
 
-        async def idle_wait_and_flush() -> None:
+        async def idle_wait_and_flush(speaker: Optional[str]) -> None:
             try:
                 await asyncio.sleep(max(0, idle_flush_seconds))
-                await flush_buffer()
+                await flush_buffer(speaker)
             except asyncio.CancelledError:
                 return
 
-        def schedule_idle_flush() -> None:
-            nonlocal idle_task
+        def schedule_idle_flush(speaker: Optional[str]) -> None:
             if idle_flush_seconds <= 0:
                 return
-            cancel_idle_task()
-            idle_task = asyncio.create_task(idle_wait_and_flush())
+            cancel_idle_task(speaker)
+            key = _speaker_key(speaker)
+            idle_tasks[key] = asyncio.create_task(idle_wait_and_flush(speaker))
 
         async def process_messages() -> None:
             """Process WebSocket messages."""
-            nonlocal current_speaker, buffer
+            nonlocal speaker_buffers
             
             try:
                 while True:
@@ -159,22 +168,18 @@ async def handle_connection(
                         continue
 
                     logger.info("subtitle: %s (speaker=%s)", text, speaker)
+                    key = _speaker_key(speaker)
+                    async with buffer_lock:
+                        buf = speaker_buffers.setdefault(key, [])
+                        buf.append(text)
 
-                    # If speaker changes mid-batch, flush existing lines first
-                    if current_speaker is None:
-                        current_speaker = speaker
-                    elif speaker != current_speaker:
-                        await flush_buffer()
-                        cancel_idle_task()
-                        current_speaker = speaker
-
-                    buffer.append(text)
-
-                    if len(buffer) >= max(1, lines_per_inference):
-                        await flush_buffer()
-                        cancel_idle_task()
+                    async with buffer_lock:
+                        current_len = len(speaker_buffers.get(key, []))
+                    if current_len >= max(1, lines_per_inference):
+                        await flush_buffer(speaker)
+                        cancel_idle_task(speaker)
                     else:
-                        schedule_idle_flush()
+                        schedule_idle_flush(speaker)
             except asyncio.CancelledError:
                 logger.info("message processing cancelled")
                 raise
@@ -194,12 +199,17 @@ async def handle_connection(
                 pass
             raise
         finally:
-            # flush remaining buffer before closing the websocket
+            # flush remaining buffers for all speakers before closing the websocket
             try:
-                await flush_buffer()
+                keys = list(speaker_buffers.keys())
+                for k in keys:
+                    try:
+                        await flush_buffer(k or None)
+                    except Exception:
+                        pass
             except Exception:
                 pass
-            cancel_idle_task()
+            cancel_all_idle_tasks()
     finally:
         if not ws.closed:
             await ws.close()
