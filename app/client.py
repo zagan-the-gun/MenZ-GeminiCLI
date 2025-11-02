@@ -44,6 +44,7 @@ async def handle_connection(
     runner: GeminiCLIRunner,
     lines_per_inference: int,
     idle_flush_seconds: int,
+    speaker_name: str,
     shutdown_event: Optional[asyncio.Event] = None,
 ) -> None:
     ws = await websockets.connect(uri)
@@ -92,7 +93,7 @@ async def handle_connection(
                 "method": "notifications/subtitle",
                 "params": {
                     "text": comment,
-                    "speaker": "wipe",
+                    "speaker": speaker_name,
                     "type": "comment",
                     "language": "ja",
                 },
@@ -175,7 +176,7 @@ async def handle_connection(
                             "method": "notifications/subtitle",
                             "params": {
                                 "text": comment,
-                                "speaker": "wipe",
+                                "speaker": speaker_name,
                                 "type": "comment",
                                 "language": "ja",
                             },
@@ -262,6 +263,8 @@ async def main_with_runner(config: ConfigParser, runner: GeminiCLIRunner) -> Non
     port = config.getint("client", "port", fallback=50001)
     uri = f"ws://{host}:{port}/"
 
+    speaker_name = config.get("client", "speaker_name", fallback="wipe")
+
     reconnect_initial_ms = config.getint("client", "reconnect_initial_ms", fallback=500)
     reconnect_max_ms = config.getint("client", "reconnect_max_ms", fallback=5000)
 
@@ -304,6 +307,7 @@ async def main_with_runner(config: ConfigParser, runner: GeminiCLIRunner) -> Non
                     runner=runner,
                     lines_per_inference=lines_per_inference,
                     idle_flush_seconds=idle_flush_seconds,
+                    speaker_name=speaker_name,
                     shutdown_event=shutdown_event,
                 ))
                 

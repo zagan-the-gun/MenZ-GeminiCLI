@@ -32,6 +32,7 @@ port = 50001
 reconnect_initial_ms = 500
 reconnect_max_ms = 5000
 log_level = DEBUG
+speaker_name = wipe
 
 [processing]
 # 何行まとめて1回の推論に投げるか
@@ -62,6 +63,7 @@ max_output_chars = 120
 - `[client]` セクション
   - `host/port`: 接続先（デフォルトは zagaroid のポート50001。MCP では常に root path `/` を使用）
   - `log_level`: ログレベル（DEBUG, INFO, WARNING, ERROR）
+  - `speaker_name`: 返送時の speaker 名（デフォルトは `wipe`。zagaroid 側の ActorConfig と合わせて設定）
   - `reconnect_*_ms`: 再接続バックオフ設定
 
 - `[processing]` セクション
