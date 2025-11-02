@@ -29,22 +29,54 @@ source .venv/bin/activate
 [client]
 host = localhost
 port = 50001
-path = /wipe_subtitle
 reconnect_initial_ms = 500
 reconnect_max_ms = 5000
+log_level = DEBUG
+
+[processing]
+# 何行まとめて1回の推論に投げるか
+lines_per_inference = 3
+# 最後の字幕受信からこの秒数経過で不足分でもフラッシュ（0で無効）
+idle_flush_seconds = 10
+
+[prompt]
+# システムプロンプト（キャラクター設定とルール）
+system_prompt =
+ あなたはWar Thunderと言うゲーム配信のワイプに映る麻原彰晃です。
+ あなたは地獄からこの配信を見ています。
+ 麻原彰晃っぽいセリフでバラエティ向きの不謹慎なコメントを返してください。
+ また、ワンパターンな回答は絶対に避けて下さい。
+
+# 字幕フォーマットテンプレート（zagaroidから送られる字幕用）
+# 利用可能プレースホルダ: {text}, {speaker}, {speaker_part}, {lines_num}
+template = {speaker}「{text}」
 
 [gemini]
-# {model} と {prompt} のプレースホルダを含むコマンドテンプレート（既定は npm版 gemini-cli）
+# 例: npm版 gemini-cli（OAuth対応）
 cli_command_template = gemini -m {model} -p {prompt}
-model_name = gemini-1.5-flash
+model_name = gemini-2.5-flash
 timeout_seconds = 60
 max_output_chars = 120
 ```
 
-- `cli_command_template`: 任意の Gemini CLI に合わせて変更してください。`{model}` と `{prompt}` は必須です。
-- `model_name`: 使用するモデル名。
-- `timeout_seconds`: CLI 実行のタイムアウト秒数。
-- `max_output_chars`: コメントの最大文字数（超過分は切り詰め）。
+- `[client]` セクション
+  - `host/port`: 接続先（デフォルトは zagaroid のポート50001。MCP では常に root path `/` を使用）
+  - `log_level`: ログレベル（DEBUG, INFO, WARNING, ERROR）
+  - `reconnect_*_ms`: 再接続バックオフ設定
+
+- `[processing]` セクション
+  - `lines_per_inference`: 何行まとめて1回の推論に投げるか（バッチ処理サイズ）
+  - `idle_flush_seconds`: 最後の字幕受信からこの秒数経過で、不足分でもフラッシュ・実行（0で無効）
+
+- `[prompt]` セクション
+  - `system_prompt`: Gemini 初回のシステムプロンプト（キャラクター設定等）
+  - `template`: 字幕フォーマットテンプレート（利用可能な変数は `{text}`, `{speaker}`, `{speaker_part}`, `{lines_num}`）
+
+- `[gemini]` セクション
+  - `cli_command_template`: 任意の Gemini CLI に合わせて変更。`{model}` と `{prompt}` は必須
+  - `model_name`: 使用するモデル名
+  - `timeout_seconds`: CLI 実行のタイムアウト秒数
+  - `max_output_chars`: コメントの最大文字数（超過分は切り詰め）
 
 
 ## 起動
@@ -54,24 +86,76 @@ source .venv/bin/activate
 ./run.sh
 ```
 
-接続先は `config.ini` の `[client]` セクションで指定した `ws://{host}:{port}{path}` になります。
+接続先は `config.ini` の `[client]` セクションで指定した `ws://{host}:{port}/` になります。
 
 
 ## WebSocket プロトコル
 
-- 受信: 字幕（サーバー→本クライアント）
+本クライアントは **MCP（Model Context Protocol）JSON-RPC 2.0 形式**に対応しています。レガシー形式も互換性のため サポートしています。
+
+### MCP 形式（推奨）
+
+- **受信: 字幕（zagaroid などのサーバー → 本クライアント）**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/subtitle",
+  "params": {
+    "text": "今日は良い天気",
+    "speaker": "viewer",
+    "type": "subtitle",
+    "language": "ja"
+  }
+}
+```
+
+- **受信: チャットコメント（zagaroid などのサーバー → 本クライアント）**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/subtitle",
+  "params": {
+    "text": "すごい！",
+    "speaker": "viewer",
+    "type": "comment",
+    "language": "ja"
+  }
+}
+```
+
+- **送信: コメント（本クライアント → zagaroid などのサーバー）**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/subtitle",
+  "params": {
+    "text": "いいね！",
+    "speaker": "wipe",
+    "type": "comment",
+    "language": "ja"
+  }
+}
+```
+
+### 処理フロー
+
+1. `type=subtitle` を受け取る → バッファに蓄積
+2. バッファが `lines_per_inference` に達するか、`idle_flush_seconds` 経過で推論実行
+3. Gemini CLI でコメント生成
+4. `type=comment` として返送
+
+- `type=comment` を受け取った場合は、即座に推論を実行して返送します
+
+### レガシー形式（互換性維持）
 
 ```json
 {"type":"subtitle","text":"今日は良い天気","speaker":"viewer"}
 ```
 
-- 送信: コメント（本クライアント→サーバー）
-
-```json
-{"type":"comment","comment":"いいね！"}
-```
-
-本クライアントは `type=subtitle` を受け取ると、Gemini CLI へプロンプトを組み立てて実行し、1 行の短い日本語コメントを生成して `type=comment` として返します。
+本クライアントは古い形式も受け取りますが、送信は常に MCP 形式です。
 
 
 ## CLI テンプレート例（任意の CLI に対応）
@@ -97,8 +181,14 @@ PATH が通らない場合は `which gemini` で絶対パスを確認し、`conf
 ## 実装のポイント
 
 - `app/geminicli_runner.py`: Gemini CLI 実行ラッパー。`{model}` と `{prompt}` を埋め込み、標準出力の先頭の非空行をコメントとして抽出します。
-- `app/client.py`: WebSocket クライアント本体。字幕受信→Gemini 実行→コメント返却、再接続のバックオフ制御などを行います。
-- `config.ini`: 接続先と CLI 設定。
+- `app/client.py`: WebSocket クライアント本体。以下の機能を実装：
+  - **MCP JSON-RPC 2.0 形式のサポート**: `params` 構造を正しく解析
+  - **バッファリング機能**: 複数行の字幕をまとめてバッチ処理（`lines_per_inference`）
+  - **アイドルフラッシュ**: 最後の字幕受信から一定時間経過後に自動実行（`idle_flush_seconds`）
+  - **チャットコメント即時処理**: `type=comment` は即座に推論実行
+  - **話者ごとのバッファ管理**: 複数の話者から並行で字幕を受け取った場合に対応
+  - **再接続のバックオフ制御**: エクスポーネンシャルバックオフで安全な再接続
+- `config.ini`: 接続先、処理設定、プロンプト、CLI 設定。
 - `run.sh` / `setup.sh`: 実行・セットアップ用スクリプト。
 
 
@@ -117,7 +207,25 @@ PATH が通らない場合は `which gemini` で絶対パスを確認し、`conf
   - `timeout_seconds` を延ばすか、モデル/プロンプトを見直してください。
 
 - WebSocket に接続できない
-  - `host/port/path` を確認。サーバー（例: zagaroid）が起動しているか確認。
+  - `config.ini` の `[client]` セクションで `host/port/path` を確認。サーバー（例: zagaroid）が起動しているか確認。
+
+- 推論が実行されない / コメントが返ってこない
+  - `log_level` を `DEBUG` に設定して詳細ログを確認してください。
+  - `lines_per_inference` が大きすぎないか確認（小さい値をお勧め、例：3）。
+  - `idle_flush_seconds` を 0 に設定している場合、字幕受信時に自動フラッシュされません。
+
+- バッファリングの挙動が予期しない
+  - `lines_per_inference`: 何行で推論を実行するか（例：3 なら3行で実行）
+  - `idle_flush_seconds`: 最後の字幕から何秒待つか（0 で無効）
+  - 両者の組み合わせにより、早期実行または遅延実行が制御されます
+
+- 複数の話者から同時に字幕が来ると反応が遅い
+  - 話者ごとにバッファが独立しているため、複数話者の場合は個別の推論が並行実行されません
+  - 逐次処理のため、CPU や CLI リソースに注意してください
+
+- メモリ使用量が増加し続ける
+  - 推論完了後もバッファが解放されていない可能性があります
+  - ログで `flush_buffer` が呼ばれているか確認してください
 
 
 ## ライセンス

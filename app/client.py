@@ -87,7 +87,16 @@ async def handle_connection(
                 logger.exception("GeminiCLI error: %s", e)
                 comment = "いいね！"
 
-            outgoing = {"type": "comment", "comment": comment}
+            outgoing = {
+                "jsonrpc": "2.0",
+                "method": "notifications/subtitle",
+                "params": {
+                    "text": comment,
+                    "speaker": "wipe",
+                    "type": "comment",
+                    "language": "ja",
+                },
+            }
             logger.debug("sending: %s", outgoing)
             await ws.send(json.dumps(outgoing, ensure_ascii=False))
 
@@ -133,10 +142,19 @@ async def handle_connection(
                         logger.warning("received non-JSON message: %s", message)
                         continue
 
-                    msg_type = payload.get("type")
-                    if msg_type == "comment":
+                    # MCP フォーマット対応: params から値を取得
+                    if payload.get("jsonrpc") == "2.0" and "params" in payload:
+                        params = payload.get("params", {})
+                        msg_type = params.get("type")
+                        text = params.get("text", "")
+                        speaker = params.get("speaker")
+                    else:
+                        # レガシー形式対応
+                        msg_type = payload.get("type")
                         text = payload.get("text", "")
                         speaker = payload.get("speaker")
+
+                    if msg_type == "comment":
                         if not text:
                             logger.info("chat: (empty) (speaker=%s)", speaker)
                             continue
@@ -152,16 +170,22 @@ async def handle_connection(
                             logger.exception("GeminiCLI error: %s", e)
                             comment = "いいね！"
 
-                        outgoing = {"type": "comment", "comment": comment}
+                        outgoing = {
+                            "jsonrpc": "2.0",
+                            "method": "notifications/subtitle",
+                            "params": {
+                                "text": comment,
+                                "speaker": "wipe",
+                                "type": "comment",
+                                "language": "ja",
+                            },
+                        }
                         logger.debug("sending: %s", outgoing)
                         await ws.send(json.dumps(outgoing, ensure_ascii=False))
                         continue
                     if msg_type != "subtitle":
                         logger.debug("skip message type=%s", msg_type)
                         continue
-
-                    text = payload.get("text", "")
-                    speaker = payload.get("speaker")
 
                     if not text:
                         logger.info("subtitle: (empty) (speaker=%s)", speaker)
@@ -236,8 +260,7 @@ async def main_with_runner(config: ConfigParser, runner: GeminiCLIRunner) -> Non
 
     host = config.get("client", "host", fallback="localhost")
     port = config.getint("client", "port", fallback=50001)
-    path = config.get("client", "path", fallback="/wipe_subtitle")
-    uri = f"ws://{host}:{port}{path}"
+    uri = f"ws://{host}:{port}/"
 
     reconnect_initial_ms = config.getint("client", "reconnect_initial_ms", fallback=500)
     reconnect_max_ms = config.getint("client", "reconnect_max_ms", fallback=5000)
